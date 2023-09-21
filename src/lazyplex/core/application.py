@@ -4,6 +4,7 @@ from functools import partial
 from inspect import signature, Signature, isgenerator
 from typing import Any, Iterable, Iterator
 
+from .constants import CTX_APPLICATION
 from .context import branch, get_context
 from .actions import Action, Lazy
 from .helpers import as_future, dummy, isasyncgen
@@ -109,7 +110,7 @@ class Application:
         return {self.context_key: item}
 
     async def get_application_context(self) -> dict:
-        return {'_application': self}
+        return {CTX_APPLICATION: self}
 
     def action(self, fn):
         self.__get_action_sig = signature(fn)
