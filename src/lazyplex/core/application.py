@@ -2,10 +2,10 @@ import asyncio
 import logging
 from functools import partial
 from inspect import signature, Signature, isgenerator
-from typing import Any, Iterable, Iterator
+from typing import Any, Iterable, Iterator, Optional, Dict
 
 from .constants import CTX_APPLICATION
-from .context import branch, get_context
+from .context import branch, create_context
 from .actions import Action, Lazy
 from .helpers import as_future, dummy, isasyncgen
 from .plugin import Plugins
@@ -35,31 +35,33 @@ class Application:
         self.plugins = Plugins()
         self.__initializer = staticmethod(initializer)
 
-    def run_until_complete(self):
-        asyncio.get_event_loop().run_until_complete(self())
+    def run_until_complete(self, ctx: Optional[Dict] = None):
+        asyncio.get_event_loop().run_until_complete(self(ctx))
 
-    def __call__(self):
+    def __call__(self, ctx: Optional[Dict] = None):
         async def wrapper():
-            ctx = get_context()
-            ctx.update(await self.get_application_context())
+            app_ctx = {
+                **await self.get_application_context(),
+                **(ctx or {})
+            }
+            with create_context(app_ctx):
+                app_init = self.__initializer()
+                if isasyncgen(app_init):
+                    iterable = await anext(app_init)
+                    _send, _throw = app_init.asend, app_init.athrow
+                elif isgenerator(app_init):
+                    iterable = next(app_init)
+                    _send, _throw = app_init.send, app_init.throw
+                else:
+                    iterable = await as_future(app_init)
+                    _send, _throw = dummy, dummy
 
-            app_init = self.__initializer()
-            if isasyncgen(app_init):
-                iterable = await anext(app_init)
-                _send, _throw = app_init.asend, app_init.athrow
-            elif isgenerator(app_init):
-                iterable = next(app_init)
-                _send, _throw = app_init.send, app_init.throw
-            else:
-                iterable = await as_future(app_init)
-                _send, _throw = dummy, dummy
+                try:
+                    result = await self.process_all(iterable)
 
-            try:
-                result = await self.process_all(iterable)
-
-                await as_future(_send(result))
-            except Exception as err:
-                await as_future(_throw(err))
+                    await as_future(_send(result))
+                except Exception as err:
+                    await as_future(_throw(err))
 
         return wrapper()
 

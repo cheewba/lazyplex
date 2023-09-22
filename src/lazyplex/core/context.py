@@ -1,6 +1,6 @@
 from contextvars import ContextVar
 from contextlib import contextmanager
-from typing import Tuple, Any
+from typing import Tuple, Any, Generator
 
 __all__ = ['get_context']
 
@@ -59,11 +59,20 @@ class ApplicationContext(dict):
 
 
 def get_context() -> ApplicationContext:
-    return _app_context
+    return _app_context.get(None)
 
 
 @contextmanager
-def branch(ctx: dict = None) -> ApplicationContext:
+def create_context(ctx: dict = None) -> Generator["ApplicationContext", None, None]:
+    token = _app_context.set(ApplicationContext(ctx) or {})
+    try:
+        yield get_context()
+    finally:
+        _branch_context.reset(token)
+
+
+@contextmanager
+def branch(ctx: dict = None)-> Generator["ApplicationContext", None, None]:
     token = _branch_context.set(ctx or {})
     try:
         yield get_context()
@@ -71,5 +80,5 @@ def branch(ctx: dict = None) -> ApplicationContext:
         _branch_context.reset(token)
 
 
-_app_context = ApplicationContext()
+_app_context = ContextVar('applicationContext')
 _branch_context = ContextVar('branchContext')
