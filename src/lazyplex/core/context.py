@@ -68,7 +68,7 @@ def create_context(ctx: dict = None) -> Generator["ApplicationContext", None, No
     try:
         yield get_context()
     finally:
-        _branch_context.reset(token)
+        _app_context.reset(token)
 
 
 @contextmanager
