@@ -38,32 +38,32 @@ class Application:
     def run_until_complete(self, ctx: Optional[Dict] = None):
         asyncio.get_event_loop().run_until_complete(self(ctx))
 
+    async def run(self, ctx: Optional[Dict] = None):
+        app_ctx = {
+            **await self.get_application_context(),
+            **(ctx or {})
+        }
+        with create_context(app_ctx):
+            app_init = self.__initializer()
+            if isasyncgen(app_init):
+                iterable = await anext(app_init)
+                _send, _throw = app_init.asend, app_init.athrow
+            elif isgenerator(app_init):
+                iterable = next(app_init)
+                _send, _throw = app_init.send, app_init.throw
+            else:
+                iterable = await as_future(app_init)
+                _send, _throw = dummy, dummy
+
+            try:
+                result = await self.process_all(iterable)
+
+                await as_future(_send(result))
+            except Exception as err:
+                await as_future(_throw(err))
+
     def __call__(self, ctx: Optional[Dict] = None):
-        async def wrapper():
-            app_ctx = {
-                **await self.get_application_context(),
-                **(ctx or {})
-            }
-            with create_context(app_ctx):
-                app_init = self.__initializer()
-                if isasyncgen(app_init):
-                    iterable = await anext(app_init)
-                    _send, _throw = app_init.asend, app_init.athrow
-                elif isgenerator(app_init):
-                    iterable = next(app_init)
-                    _send, _throw = app_init.send, app_init.throw
-                else:
-                    iterable = await as_future(app_init)
-                    _send, _throw = dummy, dummy
-
-                try:
-                    result = await self.process_all(iterable)
-
-                    await as_future(_send(result))
-                except Exception as err:
-                    await as_future(_throw(err))
-
-        return wrapper()
+        return self.run(ctx)
 
     async def process_all(self, iterable: Iterable[Any]):
         assert self.__get_action is not None, f"`action` is required for {self.name}"
