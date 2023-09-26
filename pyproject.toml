@@ -25,3 +25,6 @@ where = ["src"]
 
 [project.scripts]
 lazyplex = "lazyplex.run:main"
+
+[tool.setuptools.dynamic]
+version = {attr = "lazyplex.__version__"}
