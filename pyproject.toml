@@ -1,0 +1,27 @@
+[build-system]
+requires = ["setuptools"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "lazyplex"
+authors = [
+    {name = "cheewba", email = "chewba34@gmail.com"},
+]
+description = "Actions multi-processor"
+readme = "README.md"
+requires-python = ">=3.10"
+classifiers = [
+    "Programming Language :: Python :: 3",
+]
+dependencies = [
+    "tqdm~=4.65.0",
+    "colorama~=0.4.6",
+    "aiohttp~=3.8.4",
+]
+dynamic = ["version"]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[project.scripts]
+lazyplex = "lazyplex.run:main"
