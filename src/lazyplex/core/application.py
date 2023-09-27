@@ -11,6 +11,11 @@ from .helpers import as_future, dummy, isasyncgen
 from .plugin import Plugins
 
 logger = logging.getLogger(__name__)
+empty = object()
+
+
+async def _async_pass(data):
+    return data
 
 
 class Application:
@@ -50,17 +55,21 @@ class Application:
                 _send, _throw = app_init.asend, app_init.athrow
             elif isgenerator(app_init):
                 iterable = next(app_init)
-                _send, _throw = app_init.send, app_init.throw
+                _send, _throw = as_future(app_init.send), as_future(app_init.throw)
             else:
                 iterable = await as_future(app_init)
-                _send, _throw = dummy, dummy
+                _send, _throw = as_future(dummy), as_future(dummy)
 
             try:
                 result = await self.process_all(iterable)
-
-                await as_future(_send(result))
+                finalize = _send(result)
             except Exception as err:
-                await as_future(_throw(err))
+                finalize = _throw(err)
+
+            try:
+                await finalize
+            except (StopIteration, StopAsyncIteration):
+                pass
 
     def __call__(self, ctx: Optional[Dict] = None):
         return self.run(ctx)
@@ -81,32 +90,35 @@ class Application:
     async def process_item(self, item: Any):
         try:
             with branch({**await self.get_item_context(item)}):
-                action = await self.__get_action(item)
-                return await self.plugins.process_item(
-                    partial(self.process_action, item, action), item
-                )
+                async def _process():
+                    return await self.process_action(item, await self.__get_action(item))
+                return await self.plugins.process_item(_process, item)
         except Exception as err:
             logger.exception(f"{item}: {err}")
             raise
 
     async def process_action(self, item: Any, action: Any):
+        result = action
         if isinstance(action, Action):
-            return await action()
+            result = await action()
         elif isinstance(action, Lazy):
-            return await self.process_action(item, await action())
+            result = await self.process_action(item, await action())
         elif isinstance(action, Iterator) or isgenerator(action):
-            return [await self.process_action(item, subaction)
-                    for subaction in action]
+            result = [(await self.process_action(item, subaction))
+                      if isinstance(subaction, (Action, Lazy)) else subaction
+                      for subaction in action]
         elif isasyncgen(action):
-            return [await self.process_action(item, subaction)
-                    async for subaction in action]
-        elif isinstance(action, Iterable):
-            return await asyncio.gather(
+            result = [(await self.process_action(item, subaction))
+                      if isinstance(subaction, (Action, Lazy)) else subaction
+                      async for subaction in action]
+        elif isinstance(action, Iterable) and not isinstance(action, dict):
+            result = await asyncio.gather(
                 *[self.process_action(item, subaction)
-                  for subaction in action]
+                  if isinstance(subaction, (Action, Lazy)) else _async_pass(subaction)
+                for subaction in action]
             )
         # otherwise cosider action as a ready result
-        return action
+        return result
 
     async def get_item_context(self, item: Any) -> dict:
         return {self.context_key: item}
