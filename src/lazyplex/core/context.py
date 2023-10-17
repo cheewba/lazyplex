@@ -64,7 +64,7 @@ def get_context() -> ApplicationContext:
 
 @contextmanager
 def create_context(ctx: dict = None) -> Generator["ApplicationContext", None, None]:
-    token = _app_context.set(ApplicationContext(ctx) or {})
+    token = _app_context.set(ApplicationContext(ctx or {}))
     try:
         yield get_context()
     finally:

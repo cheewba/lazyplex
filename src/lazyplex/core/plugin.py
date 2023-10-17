@@ -59,8 +59,7 @@ class Plugins:
     async def apply(self, *loaders):
         async with AsyncExitStack() as stack:
             to_stack = stack.enter_async_context
-            plugins = [await to_stack(self._to_context(plugin))
-                           for plugin in loaders]
+            plugins = [await to_stack(self._to_context(plugin)) for plugin in loaders]
 
             for middleware in plugins[::-1]:
                 for method in self.methods:

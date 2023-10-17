@@ -2,7 +2,6 @@ import logging
 import sys
 from contextlib import contextmanager
 
-from colorama import Fore
 from tqdm import tqdm
 from tqdm.contrib import DummyTqdmFile
 from tqdm.contrib.logging import logging_redirect_tqdm
@@ -21,24 +20,17 @@ def std_out_err_redirect_tqdm():
     try:
         sys.stdout, sys.stderr = map(DummyTqdmFile, orig_out_err)
         yield orig_out_err[0]
-    # Relay exceptions
-    except Exception as exc:
-        raise exc
-    # Always restore sys.stdout/err if necessary
     finally:
+        # Always restore sys.stdout/err if necessary
         sys.stdout, sys.stderr = orig_out_err
 
 
 class ProgressBar(Plugin):
     async def process_item(self, process, item):
         ctx = get_context()
-        try:
-            result = await process()
-            ctx['progress'].update()
-            return result
-        except Exception as e:
-            logger.error(Fore.RED + f"{item}: {str(e)}")
-            raise
+        result = await process()
+        ctx['progress'].update()
+        return result
 
 
 async def progress_bar(total):
