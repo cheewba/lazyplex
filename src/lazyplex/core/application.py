@@ -174,7 +174,7 @@ class Application:
         for arg in self.__initializer_sig.parameters:
             val = bound.arguments.get(arg, empty)
             if val is empty and arg in self._arguments:
-                val = await as_future(self._arguments[arg]())
+                val = await self.get_argument(arg)
             if val is not empty:
                 init_kwargs[arg] = val
 
@@ -204,9 +204,25 @@ class Application:
         ctx[CTX_APPLICATION] = self
         ctx[CTX_COMPLETE_TASKS] = []
 
+    async def get_argument(self, name: str) -> Any:
+        return await as_future(self._arguments[name]())
+
+    def argument(self, name: str): ...
+    def argument(self, fn: Callable): ...  # noqa: F811
+    def argument(self, name_or_fn=None):  # noqa: F811
+        name = name_or_fn
+        if isinstance(name_or_fn, Callable):
+            name = name_or_fn.__name__
+        if name in self.__initializer_sig.parameters:
+            return self._argument_decorator(name)
+
+        raise AttributeError(
+            f"Attribute '{name}' must be added as application initializer's argument"
+        )
+
     def action(self, name: str, *, default: bool = False): ...
-    def action(self, fn: Callable): ...
-    def action(self, name_or_fn=None, *, default=False):
+    def action(self, fn: Callable): ...  # noqa: F811
+    def action(self, name_or_fn=None, *, default=False):  # noqa: F811
         name = name_or_fn
         def inner(fn: Callable):
             self._actions[name or fn.__name__] = _ApplicationAction(fn)
@@ -221,13 +237,13 @@ class Application:
 
 
 def application(fn: Callable) -> Application: ...
-def application(
+def application(  # noqa: F811
     name: Optional[str] = None,
     *,
     return_exception: bool = False,
     application_class: Optional[type] = None
 ) -> Callable[[Callable], Application]: ...
-def application(*args, **kwargs):
+def application(*args, **kwargs):  # noqa: F811
     def inner(fn, **kwargs):
         return (kwargs.pop('application_class', None) or Application)(fn, **kwargs)
 
