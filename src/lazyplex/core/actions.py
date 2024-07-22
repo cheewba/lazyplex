@@ -1,13 +1,13 @@
 import asyncio
 from functools import partial
 from inspect import signature, Signature, BoundArguments
-from typing import Callable, Protocol, Type, Generic, TypedDict, TypeVar, Optional
+from typing import Callable, Protocol, Type, Generic, Dict, TypeVar, Optional
 
 from .helpers import as_future
 from .context import get_context
 
 
-Ctx = TypeVar('Ctx', bound=TypedDict)
+Ctx = TypeVar('Ctx', bound=Dict)
 
 class RunnerType(Protocol, Generic[Ctx]):
     def __call__(self, *args, **kwargs) -> None: ...

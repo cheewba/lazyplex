@@ -165,7 +165,7 @@ class Application:
         bound = self.__initializer_sig.bind_partial(*args, **kwargs)
 
         action = bound.arguments.get('action')
-        if action and not action in self._actions:
+        if action and action not in self._actions:
             raise TypeError(f"Application action '{action}' is unknown.")
         action = action or self._deafult_action
         if action:

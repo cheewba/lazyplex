@@ -3,7 +3,6 @@ import argparse
 import logging
 import os
 import sys
-from asyncio import get_event_loop
 from importlib import import_module
 
 from lazyplex import Application
