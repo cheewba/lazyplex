@@ -2,7 +2,7 @@ import asyncio
 import logging
 from contextlib import ExitStack
 from functools import partial
-from inspect import signature, Signature, isgenerator
+from inspect import signature, isgenerator, Parameter
 from typing import Any, Iterable, Iterator, Optional, Dict, Callable, Tuple
 
 from .actions import Action, Lazy
@@ -20,11 +20,79 @@ async def _async_pass(data):
     return data
 
 
-class _ApplicationAction:
+class ArgumentsMixin:
     def __init__(self, fn) -> None:
         self.fn = staticmethod(fn)
         self.sig = signature(fn)
 
+        self._arguments = {}
+
+    def _has_argument(self, name, throw=False):
+        parameters: Dict[str, Parameter] = self.sig.parameters
+        has_argument = (
+            # there's an explicit argument in signature
+            name in parameters
+            # or signature has a dict of keyword arguments
+            or len([par for par in parameters.values()
+                    if par.kind == Parameter.VAR_KEYWORD])
+        )
+        if not has_argument and throw:
+            raise AttributeError(
+                f"Attribute '{name}' must be added as argument or **kwargs to {self.fn.__name__} function, "
+                f"to be processed by `argument` decorator"
+            )
+        return has_argument
+
+    def __getattr__(self, name) -> Any:
+        if self._has_argument(name, throw=True):
+            return self._argument_decorator(name)
+
+    def _argument_decorator(self, name):
+        def inner(fn):
+            self._arguments[name] = fn
+            return fn
+        return inner
+
+    async def get_argument(self, name: str, value: any) -> Any:
+        return await as_future(self._arguments[name](value))
+
+    def argument(self, name: str): ...
+    def argument(self, fn: Callable): ...  # noqa: F811
+    def argument(self, name_or_fn=None):  # noqa: F811
+        name = name_or_fn
+        if isinstance(name_or_fn, Callable):
+            name = name_or_fn.__name__
+
+        if self._has_argument(name, throw=True):
+            return self._argument_decorator(name)
+
+    async def parse_args(self, *args, **kwargs) -> Tuple[Tuple, Dict]:
+        bound = self.sig.bind_partial(*args, **kwargs)
+        bound.apply_defaults()
+
+        kwargs = {}
+        for arg in self._arguments:
+            val = await self.get_argument(arg, bound.arguments.get(arg, None))
+            (bound.arguments if arg in bound.arguments else kwargs)[arg] = val
+
+        return bound.args, {**bound.kwargs, **kwargs}
+
+    def update_args(self, args: Tuple, kwargs: Dict,
+                    *extra_args, **extra_kwargs) -> Tuple[Tuple, Dict]:
+        bound = self.sig.bind_partial(*args, **kwargs)
+        for arg, value in self.sig.bind_partial(*extra_args).arguments.items():
+            bound.arguments[arg] = value
+
+        kwargs = {}
+        for key, value in self.sig.bind_partial(**extra_kwargs).kwargs.items():
+            if key in bound.arguments:
+                bound.arguments[key] = value
+            kwargs[key] = value
+
+        return bound.args, {**bound.kwargs, **kwargs}
+
+
+class ApplicationAction(ArgumentsMixin):
     @property
     def context_key(self):
         name = 'item'
@@ -63,22 +131,20 @@ class _ApplicationAction:
     async def _process_item(self, item: Any, *, plugins: Plugins, **kwargs):
         with branch({**await self.get_item_context(item)}):
             async def _process():
-                return await self._process_action(item, await self.fn(item, **kwargs))
+                a, kw = await self.parse_args(item, **kwargs)
+                return await self._process_action(item, await self.fn(*a, **kw))
             return await plugins.process_item(_process, item)
     __call__ = _process_item
 
 
-class Application:
+class Application(ArgumentsMixin):
     name: str
     plugins: Plugins
     return_exceptions: bool
 
-    _actions: Dict[str, _ApplicationAction]
+    _actions: Dict[str, ApplicationAction]
     _arguments = Dict[str, Callable]
-    _deafult_action: Optional[str] = None
-
-    __initializer = None
-    __initializer_sig: Signature
+    _default_action: Optional[str] = None
 
     def __init__(
         self,
@@ -87,14 +153,17 @@ class Application:
         name: Optional[str] = None,
         return_exceptions: bool = False
     ) -> None:
+        super().__init__(initializer)
         self.name = name or initializer.__name__
         self.plugins = Plugins()
         self.return_exceptions = return_exceptions
 
         self._actions = {}
         self._arguments = {}
-        self.__initializer_sig = signature(initializer)
-        self.__initializer = staticmethod(initializer)
+
+    @property
+    def default_actions(self) -> Optional[str]:
+        return self._default_action
 
     def run_until_complete(self, *args, **kwargs):
         asyncio.get_event_loop().run_until_complete(self(*args, **kwargs))
@@ -143,45 +212,28 @@ class Application:
     def __call__(self, *args, **kwargs):
         return self.run(*args, **kwargs)
 
-    def __getattr__(self, name) -> Any:
-        if name in self.__initializer_sig.parameters:
-            return self._argument_decorator(name)
-
-        raise AttributeError(
-            f"Attribute '{name}' must be added as application initializer's argument, "
-            f"to be able to use it as the application function decorator"
-        )
-
-    def _argument_decorator(self, name):
-        def inner(fn):
-            self._arguments[name] = fn
-            return fn
-        return inner
-
     async def _run_initializer(
         self, *args, **kwargs
-    ) -> Tuple[Any, _ApplicationAction]:
-        init_kwargs = {}
-        bound = self.__initializer_sig.bind_partial(*args, **kwargs)
+    ) -> Tuple[Any, ApplicationAction]:
+        bound = self.sig.bind_partial(*args, **kwargs)
+        bound.apply_defaults()
 
-        action = bound.arguments.get('action')
-        if action and action not in self._actions:
-            raise TypeError(f"Application action '{action}' is unknown.")
-        action = action or self._deafult_action
-        if action:
-            init_kwargs['action'] = action
+        action = bound.arguments.get('action', empty)
+        if not action or action is empty:
+            action = self._default_action
+        if not action or action not in self._actions:
+            raise TypeError(f"Application action `{action or ''}` is unknown.")
+        bound.arguments['action'] = action
 
-        for arg in self.__initializer_sig.parameters:
-            val = bound.arguments.get(arg, empty)
-            if val is empty and arg in self._arguments:
-                val = await self.get_argument(arg)
-            if val is not empty:
-                init_kwargs[arg] = val
+        kwargs = {}
+        for arg in self._arguments:
+            val = await self.get_argument(arg, bound.arguments.get(arg, None))
+            (bound.arguments if arg in bound.arguments else kwargs)[arg] = val
 
-        return (self.__initializer(**init_kwargs),
+        return (self.fn(*bound.args, **{**bound.kwargs, **kwargs}),
                 self._actions.get(action))
 
-    async def process_all(self, action: _ApplicationAction,
+    async def process_all(self, action: ApplicationAction,
                           iterable: Iterable[Any]):
         if isinstance(iterable, Iterator):
             # process one by one
@@ -204,30 +256,15 @@ class Application:
         ctx[CTX_APPLICATION] = self
         ctx[CTX_COMPLETE_TASKS] = []
 
-    async def get_argument(self, name: str) -> Any:
-        return await as_future(self._arguments[name]())
-
-    def argument(self, name: str): ...
-    def argument(self, fn: Callable): ...  # noqa: F811
-    def argument(self, name_or_fn=None):  # noqa: F811
-        name = name_or_fn
-        if isinstance(name_or_fn, Callable):
-            name = name_or_fn.__name__
-        if name in self.__initializer_sig.parameters:
-            return self._argument_decorator(name)
-
-        raise AttributeError(
-            f"Attribute '{name}' must be added as application initializer's argument"
-        )
-
     def action(self, name: str, *, default: bool = False): ...
     def action(self, fn: Callable): ...  # noqa: F811
     def action(self, name_or_fn=None, *, default=False):  # noqa: F811
         name = name_or_fn
         def inner(fn: Callable):
-            self._actions[name or fn.__name__] = _ApplicationAction(fn)
-            if default or self._deafult_action is None:
-                self._deafult_action = name
+            acion_name = name or fn.__name__
+            self._actions[acion_name] = ApplicationAction(fn)
+            if default or self._default_action is None:
+                self._default_action = acion_name
             return fn
 
         if isinstance(name_or_fn, Callable):
