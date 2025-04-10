@@ -187,19 +187,19 @@ class Application(ArgumentsMixin):
                 _send, _throw = app_init.asend, app_init.athrow
             elif isgenerator(app_init):
                 iterable = next(app_init)
-                _send, _throw = as_future(app_init.send), as_future(app_init.throw)
+                _send, _throw = app_init.send, app_init.throw
             else:
                 iterable = await as_future(app_init)
-                _send, _throw = as_future(dummy), as_future(dummy)
+                _send, _throw = dummy, dummy
 
             # TODO: case if there's no action and result returned
             # TODO: should app return exceptions or raise if any action is failed ?
 
             try:
                 result = await self.process_all(action, iterable)
-                finalize = _send(result)
+                finalize = as_future(_send(result))
             except Exception as err:
-                finalize = _throw(err)
+                finalize = as_future(_throw(err))
 
             try:
                 await finalize
@@ -265,7 +265,7 @@ class Application(ArgumentsMixin):
             self._actions[acion_name] = ApplicationAction(fn)
             if default or self._default_action is None:
                 self._default_action = acion_name
-            return fn
+            return self._actions[acion_name]
 
         if isinstance(name_or_fn, Callable):
             name = name_or_fn.__name__
