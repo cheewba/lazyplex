@@ -3,7 +3,10 @@ import logging
 from contextlib import ExitStack
 from functools import partial
 from inspect import signature, isgenerator, Parameter
-from typing import Any, Iterable, Iterator, Optional, Dict, Callable, Tuple
+from typing import (
+    Any, Iterable, Iterator, Optional, Dict, Callable, Tuple,
+    AsyncIterable, AsyncIterator, Union,
+)
 
 from .actions import Action, Lazy
 from .constants import CTX_APPLICATION, CTX_COMPLETE_TASKS
@@ -234,21 +237,25 @@ class Application(ArgumentsMixin):
                 self._actions.get(action))
 
     async def process_all(self, action: ApplicationAction,
-                          iterable: Iterable[Any]):
+                          iterable: Union[Iterable[Any], AsyncIterable[Any]]):
+        async def wrapper(item):
+            try:
+                return await action(item, plugins=self.plugins)
+            except Exception as e:
+                if self.return_exceptions:
+                    return e
+                raise e
+
         if isinstance(iterable, Iterator):
             # process one by one
-            async def wrapper(item):
-                try:
-                    return await action(item, plugins=self.plugins)
-                except Exception as e:
-                    if self.return_exceptions:
-                        return e
-                    raise e
             return [await wrapper(item) for item in iterable]
+        elif isinstance(iterable, AsyncIterator):
+            # process one by one
+            return [await wrapper(item) async for item in iterable]
 
         # process all together
         return await asyncio.gather(
-            *[action(item, plugins=self.plugins) for item in iterable],
+            *[wrapper(item) for item in iterable],
             return_exceptions=self.return_exceptions
         )
 
