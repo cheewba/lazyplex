@@ -4,3 +4,7 @@ class LazyplexError(Exception):
 
 class ApplicationNotStarted(LazyplexError):
     pass
+
+
+class ExecutionError(LazyplexError):
+    pass

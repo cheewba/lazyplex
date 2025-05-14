@@ -1,19 +1,22 @@
 import asyncio
 import logging
-from contextlib import ExitStack
+from contextlib import asynccontextmanager, AsyncExitStack
 from functools import partial
 from inspect import signature, isgenerator, Parameter
 from typing import (
-    Any, Iterable, Iterator, Optional, Dict, Callable, Tuple,
-    AsyncIterable, AsyncIterator, Union,
+    Any, Iterable, Iterator, Optional, Dict, Callable,
+    Tuple, AsyncIterable,
 )
 
 from .actions import Action, Lazy
 from .constants import CTX_APPLICATION, CTX_COMPLETE_TASKS
 from .context import branch, create_context, get_context
-from .helpers import as_future, dummy, isasyncgen
+from .helpers import as_future, isasyncgen
 from .plugin import Plugins
-from .errors import ApplicationNotStarted
+from .errors import ApplicationNotStarted, ExecutionError
+
+
+__all__ = ["Application", "return_value"]
 
 logger = logging.getLogger(__name__)
 empty = object()
@@ -21,6 +24,13 @@ empty = object()
 
 async def _async_pass(data):
     return data
+
+
+def return_value(value: Any):
+    app = get_context()[CTX_APPLICATION]
+    if not app:
+        raise ExecutionError("Can't be used outside of application context")
+    app.set_value(value)
 
 
 class ArgumentsMixin:
@@ -154,15 +164,20 @@ class Application(ArgumentsMixin):
         initializer,
         *,
         name: Optional[str] = None,
-        return_exceptions: bool = False
+        return_exceptions: bool = False,
+        # don't iterate over items in action
+        protected_items: bool = False,
     ) -> None:
         super().__init__(initializer)
         self.name = name or initializer.__name__
         self.plugins = Plugins()
         self.return_exceptions = return_exceptions
+        self.protected_items = protected_items
 
         self._actions = {}
         self._arguments = {}
+
+        self.__return_value = None
 
     @property
     def default_actions(self) -> Optional[str]:
@@ -177,40 +192,80 @@ class Application(ArgumentsMixin):
             raise ApplicationNotStarted("Can't add task to unstarted application")
         ctx[CTX_COMPLETE_TASKS].append(partial(fn, *args, **kwargs))
 
+    def set_value(self, value):
+        """ Set return value of application """
+        self.__return_value = value
+
     async def run(self, *args, **kwargs):
-        with ExitStack() as stack:
+        @asynccontextmanager
+        async def _cleanup():
+            try:
+                yield
+            finally:
+                if len(tasks := ctx[CTX_COMPLETE_TASKS]):
+                    await asyncio.gather(*[task() for task in tasks])
+
+        def _raise_stop(result):
+            raise StopIteration
+
+        def _raise_error(error):
+            raise error
+
+        async with AsyncExitStack() as stack:
+            await stack.enter_async_context(_cleanup())
+
             ctx = get_context()
             if ctx is None:
                 ctx = stack.enter_context(create_context({}))
             await self.update_application_context(ctx)
 
             app_init, action = await self._run_initializer(*args, **kwargs)
+            action_data, _send, _throw = None, None, None
             if isasyncgen(app_init):
-                iterable = await anext(app_init)
+                action_data = await anext(app_init)
                 _send, _throw = app_init.asend, app_init.athrow
             elif isgenerator(app_init):
-                iterable = next(app_init)
+                action_data = next(app_init)
                 _send, _throw = app_init.send, app_init.throw
             else:
-                iterable = await as_future(app_init)
-                _send, _throw = dummy, dummy
+                # in case of regular function, just process the returned result
+                action_data = await as_future(app_init)
+                _send, _throw = _raise_stop, _raise_error
 
-            # TODO: case if there's no action and result returned
-            # TODO: should app return exceptions or raise if any action is failed ?
+            while True:
+                try:
+                    result = await self.process_action_data(action, action_data)
+                    action_data = await as_future(_send(result))
+                except (StopIteration, StopAsyncIteration):
+                    break
+                except Exception as err:
+                    action_data = await as_future(_throw(err))
 
+        return self.__return_value
+
+    async def process_action_data(self, action: ApplicationAction, data: Any):
+        async def wrapper(item):
             try:
-                result = await self.process_all(action, iterable)
-                finalize = as_future(_send(result))
-            except Exception as err:
-                finalize = as_future(_throw(err))
+                return await action(item, plugins=self.plugins)
+            except Exception as e:
+                if self.return_exceptions:
+                    return e
+                raise e
 
-            try:
-                await finalize
-            except (StopIteration, StopAsyncIteration):
-                pass
-            finally:
-                if len(tasks := ctx[CTX_COMPLETE_TASKS]):
-                    await asyncio.gather(*[task() for task in tasks])
+        tasks = None
+        if not self.protected_items:
+            if isinstance(data, AsyncIterable):
+                tasks = [asyncio.create_task(wrapper(item))
+                         async for item in data]
+            elif isinstance(data, Iterable):
+                tasks = [asyncio.create_task(wrapper(item))
+                         for item in data]
+
+        if tasks is None:
+            # if no tasks were created, process data as a single item
+            return await wrapper(data)
+
+        return await asyncio.gather(*tasks, return_exceptions=self.return_exceptions)
 
     def __call__(self, *args, **kwargs):
         return self.run(*args, **kwargs)
@@ -235,29 +290,6 @@ class Application(ArgumentsMixin):
 
         return (self.fn(*bound.args, **{**bound.kwargs, **kwargs}),
                 self._actions.get(action))
-
-    async def process_all(self, action: ApplicationAction,
-                          iterable: Union[Iterable[Any], AsyncIterable[Any]]):
-        async def wrapper(item):
-            try:
-                return await action(item, plugins=self.plugins)
-            except Exception as e:
-                if self.return_exceptions:
-                    return e
-                raise e
-
-        if isinstance(iterable, Iterator):
-            # process one by one
-            return [await wrapper(item) for item in iterable]
-        elif isinstance(iterable, AsyncIterator):
-            # process one by one
-            return [await wrapper(item) async for item in iterable]
-
-        # process all together
-        return await asyncio.gather(
-            *[wrapper(item) for item in iterable],
-            return_exceptions=self.return_exceptions
-        )
 
     async def update_application_context(self, ctx: Dict) -> dict:
         ctx[CTX_APPLICATION] = self
@@ -285,6 +317,7 @@ def application(  # noqa: F811
     name: Optional[str] = None,
     *,
     return_exception: bool = False,
+    protected_items: bool = False,
     application_class: Optional[type] = None
 ) -> Callable[[Callable], Application]: ...
 def application(*args, **kwargs):  # noqa: F811
