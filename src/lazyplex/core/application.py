@@ -16,7 +16,7 @@ from .plugin import Plugins
 from .errors import ApplicationNotStarted, ExecutionError
 
 
-__all__ = ["Application", "return_value"]
+# __all__ = ["Application", "return_value"]
 
 logger = logging.getLogger(__name__)
 empty = object()
