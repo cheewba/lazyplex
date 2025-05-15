@@ -1,11 +1,12 @@
 import asyncio
 import logging
+import itertools
 from contextlib import asynccontextmanager, AsyncExitStack
 from functools import partial
 from inspect import signature, isgenerator, Parameter
 from typing import (
     Any, Iterable, Iterator, Optional, Dict, Callable,
-    Tuple, AsyncIterable,
+    Tuple, AsyncIterable, Generic, TypeVar
 )
 
 from .actions import Action, Lazy
@@ -16,10 +17,12 @@ from .plugin import Plugins
 from .errors import ApplicationNotStarted, ExecutionError
 
 
-# __all__ = ["Application", "return_value"]
+# __all__ = ["Application", "return_value", "ApplicationAction"]
 
 logger = logging.getLogger(__name__)
 empty = object()
+
+T = TypeVar("T")
 
 
 async def _async_pass(data):
@@ -115,8 +118,11 @@ class ApplicationAction(ArgumentsMixin):
                 name = args[0]
         return name
 
-    async def get_item_context(self, item: Any) -> dict:
-        return {self.context_key: item}
+    async def get_item_context(self, item: Any, index: Optional[int] = None) -> dict:
+        return {
+            self.context_key: item,
+            f"{self.context_key}_index": index,
+        }
 
     async def _process_action(self, item: Any, action: Any):
         result = action
@@ -141,21 +147,24 @@ class ApplicationAction(ArgumentsMixin):
         # otherwise cosider action as a ready result
         return result
 
-    async def _process_item(self, item: Any, *, plugins: Plugins, **kwargs):
-        with branch({**await self.get_item_context(item)}):
+    async def process_item(self, item: Any, *, plugins: Plugins, **kwargs):
+        with branch({**await self.get_item_context(item, kwargs.get('index'))}):
             async def _process():
                 a, kw = await self.parse_args(item, **kwargs)
                 return await self._process_action(item, await self.fn(*a, **kw))
             return await plugins.process_item(_process, item)
-    __call__ = _process_item
+
+    def __call__(self, *args, **kwargs):
+        return self.process_item(*args, **kwargs)
 
 
-class Application(ArgumentsMixin):
+class Application(Generic[T], ArgumentsMixin):
     name: str
     plugins: Plugins
     return_exceptions: bool
+    action_class: T = ApplicationAction
 
-    _actions: Dict[str, ApplicationAction]
+    _actions: Dict[str, T]
     _arguments = Dict[str, Callable]
     _default_action: Optional[str] = None
 
@@ -232,9 +241,10 @@ class Application(ArgumentsMixin):
                 action_data = await as_future(app_init)
                 _send, _throw = _raise_stop, _raise_error
 
+            counter = itertools.count(start=1, step=1)
             while True:
                 try:
-                    result = await self.process_action_data(action, action_data)
+                    result = await self.process_action_data(action, action_data, counter)
                     action_data = await as_future(_send(result))
                 except (StopIteration, StopAsyncIteration):
                     break
@@ -243,10 +253,11 @@ class Application(ArgumentsMixin):
 
         return self.__return_value
 
-    async def process_action_data(self, action: ApplicationAction, data: Any):
-        async def wrapper(item):
+    async def process_action_data(self, action: T, data: Any, counter: Iterator[int] = None):
+        counter = counter or itertools.count(start=1, step=1)
+        async def wrapper(item, index):
             try:
-                return await action(item, plugins=self.plugins)
+                return await action(item, plugins=self.plugins, index=index)
             except Exception as e:
                 if self.return_exceptions:
                     return e
@@ -255,10 +266,10 @@ class Application(ArgumentsMixin):
         tasks = None
         if not self.protected_items:
             if isinstance(data, AsyncIterable):
-                tasks = [asyncio.create_task(wrapper(item))
+                tasks = [asyncio.create_task(wrapper(item, next(counter)))
                          async for item in data]
             elif isinstance(data, Iterable):
-                tasks = [asyncio.create_task(wrapper(item))
+                tasks = [asyncio.create_task(wrapper(item, next(counter)))
                          for item in data]
 
         if tasks is None:
@@ -272,7 +283,7 @@ class Application(ArgumentsMixin):
 
     async def _run_initializer(
         self, *args, **kwargs
-    ) -> Tuple[Any, ApplicationAction]:
+    ) -> Tuple[Any, T]:
         bound = self.sig.bind_partial(*args, **kwargs)
         bound.apply_defaults()
 
@@ -301,7 +312,7 @@ class Application(ArgumentsMixin):
         name = name_or_fn
         def inner(fn: Callable):
             acion_name = name or fn.__name__
-            self._actions[acion_name] = ApplicationAction(fn)
+            self._actions[acion_name] = self.action_class(fn)
             if default or self._default_action is None:
                 self._default_action = acion_name
             return self._actions[acion_name]
