@@ -1,5 +1,5 @@
 from contextlib import asynccontextmanager, AsyncExitStack
-from typing import Any
+from typing import Any, AsyncIterator
 
 from .context import get_context
 
@@ -47,13 +47,16 @@ class Plugins:
 
     @asynccontextmanager
     async def _to_context(self, loader):
-        try:
-            yield await anext(loader)
-        finally:
+        if isinstance(loader, AsyncIterator):
             try:
-                await anext(loader)
-            except StopAsyncIteration:
-                pass
+                yield await anext(loader)
+            finally:
+                try:
+                    await anext(loader)
+                except StopAsyncIteration:
+                    pass
+        else:
+            yield loader
 
     @asynccontextmanager
     async def apply(self, *loaders):
