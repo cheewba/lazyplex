@@ -148,7 +148,7 @@ class ApplicationAction(ArgumentsMixin):
         return result
 
     async def process_item(self, item: Any, *, plugins: Plugins, **kwargs):
-        with branch({**await self.get_item_context(item, kwargs.get('index'))}):
+        with branch({**await self.get_item_context(item, kwargs.pop('index', None))}):
             async def _process():
                 a, kw = await self.parse_args(item, **kwargs)
                 return await self._process_action(item, await self.fn(*a, **kw))
@@ -274,7 +274,7 @@ class Application(Generic[T], ArgumentsMixin):
 
         if tasks is None:
             # if no tasks were created, process data as a single item
-            return await wrapper(data)
+            return await wrapper(data, next(counter))
 
         return await asyncio.gather(*tasks, return_exceptions=self.return_exceptions)
 
