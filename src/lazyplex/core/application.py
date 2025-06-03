@@ -3,7 +3,7 @@ import logging
 import itertools
 from contextlib import asynccontextmanager, AsyncExitStack
 from functools import partial
-from inspect import signature, isgenerator, Parameter
+from inspect import signature, isgenerator, Parameter, BoundArguments
 from typing import (
     Any, Iterable, Iterator, Optional, Dict, Callable,
     Tuple, AsyncIterable, Generic, TypeVar
@@ -82,8 +82,13 @@ class ArgumentsMixin:
         if self._has_argument(name, throw=True):
             return self._argument_decorator(name)
 
+    def bind_args(self, *args, **kwargs) -> BoundArguments:
+        kw = self.sig.bind_partial(*args).arguments.copy()
+        kw.update(kwargs)
+        return self.sig.bind_partial(**kw)
+
     async def parse_args(self, *args, **kwargs) -> Tuple[Tuple, Dict]:
-        bound = self.sig.bind_partial(*args, **kwargs)
+        bound = self.bind_args(*args, **kwargs)
         bound.apply_defaults()
 
         kwargs = {}
@@ -95,7 +100,7 @@ class ArgumentsMixin:
 
     def update_args(self, args: Tuple, kwargs: Dict,
                     *extra_args, **extra_kwargs) -> Tuple[Tuple, Dict]:
-        bound = self.sig.bind_partial(*args, **kwargs)
+        bound = self.bind_args(*args, **kwargs)
         for arg, value in self.sig.bind_partial(*extra_args).arguments.items():
             bound.arguments[arg] = value
 
@@ -149,9 +154,10 @@ class ApplicationAction(ArgumentsMixin):
 
     async def process_item(self, item: Any, *, plugins: Plugins, **kwargs):
         with branch({**await self.get_item_context(item, kwargs.pop('index', None))}):
-            async def _process():
-                a, kw = await self.parse_args(item, **kwargs)
-                return await self._process_action(item, await self.fn(*a, **kw))
+            async def _process(_item):
+                a, kw = await self.parse_args(_item, **kwargs)
+                return await self._process_action(_item, await self.fn(*a, **kw))
+
             return await plugins.process_item(_process, item)
 
     def __call__(self, *args, **kwargs):
@@ -244,7 +250,11 @@ class Application(Generic[T], ArgumentsMixin):
             counter = itertools.count(start=1, step=1)
             while True:
                 try:
-                    result = await self.process_action_data(action, action_data, counter)
+                    result = None
+                    if action is not None:
+                        async def _process(action, data):
+                            return await self.process_action_data(action, data, counter, **kwargs)
+                        result = await self.plugins.process_action_data(_process, action, action_data)
                     action_data = await as_future(_send(result))
                 except (StopIteration, StopAsyncIteration):
                     break
@@ -253,11 +263,12 @@ class Application(Generic[T], ArgumentsMixin):
 
         return self.__return_value
 
-    async def process_action_data(self, action: T, data: Any, counter: Iterator[int] = None):
+    async def process_action_data(self, action: T, data: Any,
+                                  counter: Iterator[int] = None, **kwargs):
         counter = counter or itertools.count(start=1, step=1)
         async def wrapper(item, index):
             try:
-                return await action(item, plugins=self.plugins, index=index)
+                return await action(item, plugins=self.plugins, index=index, **kwargs)
             except Exception as e:
                 if self.return_exceptions:
                     return e
@@ -281,26 +292,26 @@ class Application(Generic[T], ArgumentsMixin):
     def __call__(self, *args, **kwargs):
         return self.run(*args, **kwargs)
 
-    async def _run_initializer(
-        self, *args, **kwargs
-    ) -> Tuple[Any, T]:
-        bound = self.sig.bind_partial(*args, **kwargs)
+    def action_from_args(self, *args, **kwargs) -> Tuple[str, Optional[ApplicationAction]]:
+        bound = self.bind_args(*args, **kwargs)
         bound.apply_defaults()
 
         action = bound.arguments.get('action', empty)
         if not action or action is empty:
             action = self._default_action
-        if not action or action not in self._actions:
-            raise TypeError(f"Application action `{action or ''}` is unknown.")
-        bound.arguments['action'] = action
+        return (name := action or ""), self._actions.get(name)
 
-        kwargs = {}
-        for arg in self._arguments:
-            val = await self.get_argument(arg, bound.arguments.get(arg, None))
-            (bound.arguments if arg in bound.arguments else kwargs)[arg] = val
+    async def _run_initializer(
+        self, *args, **kwargs
+    ) -> Tuple[Any, T]:
+        action_name, action = self.action_from_args(*args, **kwargs)
+        if action is not None:
+            if action_name not in self._actions:
+                raise TypeError(f"Application action `{action or ''}` is unknown.")
+            args, kwargs = self.update_args(args, kwargs, action=action_name)
 
-        return (self.fn(*bound.args, **{**bound.kwargs, **kwargs}),
-                self._actions.get(action))
+        a, kw = await self.parse_args(*args, **kwargs)
+        return (self.fn(*a, **kw), action)
 
     async def update_application_context(self, ctx: Dict) -> dict:
         ctx[CTX_APPLICATION] = self

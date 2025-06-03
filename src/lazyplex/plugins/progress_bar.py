@@ -28,7 +28,7 @@ def std_out_err_redirect_tqdm():
 class ProgressBar(Plugin):
     async def process_item(self, process, item):
         ctx = get_context()
-        result = await process()
+        result = await process(item)
         ctx['progress'].update()
         return result
 
