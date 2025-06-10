@@ -161,6 +161,14 @@ class ApplicationAction(ArgumentsMixin):
             return await plugins.process_item(_process, item)
 
     def __call__(self, *args, **kwargs):
+        ctx = get_context()
+        app = ctx.get(CTX_APPLICATION) if ctx else None
+        itm = ctx.get(self.context_key) if ctx else None
+        if app is None or itm is not None:
+            # if the method called outside of the app context,
+            # or item context already initialized, call the action as a regular function
+            return self.fn(*args, **kwargs)
+
         return self.process_item(*args, **kwargs)
 
 
