@@ -15,7 +15,7 @@ Lazyplex is a Python 3.11+ framework for building asynchronous data processing a
 ## Installation
 
 ```bash
-pip install lazyplex
+pip install -e git+https://github.com/cheewba/lazyplex.git#egg=lazyplex
 ```
 
 ## Core API Reference
