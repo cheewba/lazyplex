@@ -6,7 +6,7 @@ from functools import partial
 from inspect import signature, isgenerator, Parameter, BoundArguments
 from typing import (
     Any, Iterable, Iterator, Optional, Dict, Callable,
-    Tuple, AsyncIterable, Generic, TypeVar
+    Tuple, AsyncIterable, Generic, TypeVar, List
 )
 
 from .actions import Action, Lazy
@@ -76,41 +76,91 @@ class ArgumentsMixin:
     def argument(self, fn: Callable): ...  # noqa: F811
     def argument(self, name_or_fn=None):  # noqa: F811
         name = name_or_fn
-        if isinstance(name_or_fn, Callable):
+        is_callable = isinstance(name_or_fn, Callable)
+        if is_callable:
             name = name_or_fn.__name__
 
         if self._has_argument(name, throw=True):
-            return self._argument_decorator(name)
+            decorator = self._argument_decorator(name)
+            if is_callable:
+                decorator = decorator(name_or_fn)
+            return decorator
 
     def bind_args(self, *args, **kwargs) -> BoundArguments:
         kw = self.sig.bind_partial(*args).arguments.copy()
         kw.update(kwargs)
         return self.sig.bind_partial(**kw)
 
-    async def parse_args(self, *args, **kwargs) -> Tuple[Tuple, Dict]:
-        bound = self.bind_args(*args, **kwargs)
+    async def parse_args(self, *args, **kwargs) -> Tuple[Tuple[Any, ...], Dict[str, Any]]:
+        """
+        Returns:
+        args_out: only positional-only params + var-positional items
+        kwargs_out: all keywordable params (pos-or-kw + kw-only) + contents of **kwargs
+                    (and optional extras if the signature has **kwargs)
+        """
+        bound = self.bind_args(*args, **kwargs)  # -> inspect.BoundArguments
         bound.apply_defaults()
 
-        kwargs = {}
-        for arg in self._arguments:
-            val = await self.get_argument(arg, bound.arguments.get(arg, None))
-            (bound.arguments if arg in bound.arguments else kwargs)[arg] = val
+        # Optional: compute/override values
+        # Keep extras (names not in signature) separate so we don't pollute the call
+        extra_kwargs: Dict[str, Any] = {}
 
-        return bound.args, {**bound.kwargs, **kwargs}
+        for name in self._arguments:
+            current = bound.arguments.get(name)
+            val = await self.get_argument(name, current)
+            if name in bound.arguments:
+                bound.arguments[name] = val
+            else:
+                # Not a parameter in the signature; consider adding only if **kwargs exists
+                extra_kwargs[name] = val
+
+        params = bound.signature.parameters
+        kwargs_out: Dict[str, Any] = {}
+        has_var_kw = any(p.kind is Parameter.VAR_KEYWORD for p in params.values())
+
+        # Build kwargs_out from keywordable params + **kwargs contents
+        for name, param in params.items():
+            if param.kind in (Parameter.POSITIONAL_OR_KEYWORD, Parameter.KEYWORD_ONLY):
+                kwargs_out[name] = bound.arguments[name]
+            elif param.kind is Parameter.VAR_KEYWORD:
+                # Merge actual extra keywords provided by the caller
+                kwargs_out.update(bound.arguments.get(name, {}) or {})
+
+        # Optionally include computed extras only if the function accepts **kwargs
+        if has_var_kw and extra_kwargs:
+            kwargs_out.update(extra_kwargs)
+
+        # Build args_out containing only truly positional data
+        args_out_list = []
+        for name, param in params.items():
+            if param.kind is Parameter.POSITIONAL_ONLY:
+                args_out_list.append(bound.arguments[name])
+            elif param.kind is Parameter.VAR_POSITIONAL:
+                args_out_list.extend(bound.arguments.get(name, ()) or ())
+        args_out = tuple(args_out_list)
+
+        return args_out, kwargs_out
 
     def update_args(self, args: Tuple, kwargs: Dict,
                     *extra_args, **extra_kwargs) -> Tuple[Tuple, Dict]:
+        params = self.sig.parameters
+
+        has_var_kwargs = any(par for par in params.values()
+                             if par.kind == Parameter.VAR_KEYWORD) > 0
+        if not has_var_kwargs:
+            # if there's no **kwargs in method signature, we have to exclude
+            # unexpected kwarg arguments
+            extra_kwargs = {key: value for key, value in extra_kwargs.items()
+                            if key in self.sig.parameters}
+
         bound = self.bind_args(*args, **kwargs)
-        for arg, value in self.sig.bind_partial(*extra_args).arguments.items():
-            bound.arguments[arg] = value
-
-        kwargs = {}
-        for key, value in self.sig.bind_partial(**extra_kwargs).kwargs.items():
-            if key in bound.arguments:
+        for key, value in self.sig.bind_partial(*extra_args, **extra_kwargs).arguments.items():
+            if params.get(key).kind == Parameter.VAR_KEYWORD:
+                bound.arguments.setdefault(key, {}).update(value)
+            else:
                 bound.arguments[key] = value
-            kwargs[key] = value
 
-        return bound.args, {**bound.kwargs, **kwargs}
+        return bound.args, bound.kwargs
 
 
 class ApplicationAction(ArgumentsMixin):
@@ -200,14 +250,14 @@ class Application(Generic[T], ArgumentsMixin):
         self._actions = {}
         self._arguments = {}
 
-        self.__return_value = None
+        self.__return_value = empty
 
     @property
     def default_actions(self) -> Optional[str]:
         return self._default_action
 
     def run_until_complete(self, *args, **kwargs):
-        asyncio.get_event_loop().run_until_complete(self(*args, **kwargs))
+        return asyncio.get_event_loop().run_until_complete(self(*args, **kwargs))
 
     def add_complete_tasks(self, fn, *args, **kwargs):
         ctx = get_context()
@@ -242,7 +292,9 @@ class Application(Generic[T], ArgumentsMixin):
                 ctx = stack.enter_context(create_context({}))
             await self.update_application_context(ctx)
 
-            app_init, action = await self._run_initializer(*args, **kwargs)
+            action, args, kwargs = await self._process_initial_args(*args, **kwargs)
+            app_init = self.fn(*args, **kwargs)
+
             action_data, _send, _throw = None, None, None
             if isasyncgen(app_init):
                 action_data = await anext(app_init)
@@ -269,7 +321,7 @@ class Application(Generic[T], ArgumentsMixin):
                 except Exception as err:
                     action_data = await as_future(_throw(err))
 
-        return self.__return_value
+        return self.__return_value if self.__return_value is not empty else result
 
     async def process_action_data(self, action: T, data: Any,
                                   counter: Iterator[int] = None, **kwargs):
@@ -309,9 +361,9 @@ class Application(Generic[T], ArgumentsMixin):
             action = self._default_action
         return (name := action or ""), self._actions.get(name)
 
-    async def _run_initializer(
+    async def _process_initial_args(
         self, *args, **kwargs
-    ) -> Tuple[Any, T]:
+    ) -> Tuple[T, List[Any], Dict[str, Any]]:
         action_name, action = self.action_from_args(*args, **kwargs)
         if action is not None:
             if action_name not in self._actions:
@@ -319,7 +371,7 @@ class Application(Generic[T], ArgumentsMixin):
             args, kwargs = self.update_args(args, kwargs, action=action_name)
 
         a, kw = await self.parse_args(*args, **kwargs)
-        return (self.fn(*a, **kw), action)
+        return action, a, kw
 
     async def update_application_context(self, ctx: Dict) -> dict:
         ctx[CTX_APPLICATION] = self
