@@ -313,7 +313,7 @@ class Application(Generic[T], ArgumentsMixin):
                     result = None
                     if action is not None:
                         async def _process(action, data):
-                            return await self.process_action_data(action, data, counter, **kwargs)
+                            return await self.process_action_data(action, data, counter, kwargs)
                         result = await self.plugins.process_action_data(_process, action, action_data)
                     action_data = await as_future(_send(result))
                 except (StopIteration, StopAsyncIteration):
@@ -324,11 +324,13 @@ class Application(Generic[T], ArgumentsMixin):
         return self.__return_value if self.__return_value is not empty else result
 
     async def process_action_data(self, action: T, data: Any,
-                                  counter: Iterator[int] = None, **kwargs):
+                                  counter: Iterator[int] = None,
+                                  kwargs: Optional[Dict] = None):
         counter = counter or itertools.count(start=1, step=1)
         async def wrapper(item, index):
             try:
-                return await action(item, plugins=self.plugins, index=index, **kwargs)
+                return await action(item, plugins=self.plugins,
+                                    index=index, **(kwargs or {}))
             except Exception as e:
                 if self.return_exceptions:
                     return e
