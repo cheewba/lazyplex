@@ -87,6 +87,7 @@ class ArgumentsMixin:
             return decorator
 
     def bind_args(self, *args, **kwargs) -> BoundArguments:
+
         kw = self.sig.bind_partial(*args).arguments.copy()
         kw.update(kwargs)
         return self.sig.bind_partial(**kw)
@@ -292,7 +293,7 @@ class Application(Generic[T], ArgumentsMixin):
                 ctx = stack.enter_context(create_context({}))
             await self.update_application_context(ctx)
 
-            action, args, kwargs = await self._process_initial_args(*args, **kwargs)
+            action, args, kwargs, extra = await self._process_initial_args(*args, **kwargs)
             app_init = self.fn(*args, **kwargs)
 
             action_data, _send, _throw = None, None, None
@@ -308,12 +309,16 @@ class Application(Generic[T], ArgumentsMixin):
                 _send, _throw = _raise_stop, _raise_error
 
             counter = itertools.count(start=1, step=1)
+            # since application and action might have a different signatures,
+            # we need to merge kwargs that we know not related to application
+            # and kwargs that are passed to application function
+            _, action_kwargs = action.update_args(tuple(), extra, **kwargs)
             while True:
                 try:
                     result = None
                     if action is not None:
                         async def _process(action, data):
-                            return await self.process_action_data(action, data, counter, kwargs)
+                            return await self.process_action_data(action, data, counter, action_kwargs)
                         result = await self.plugins.process_action_data(_process, action, action_data)
                     action_data = await as_future(_send(result))
                 except (StopIteration, StopAsyncIteration):
@@ -366,6 +371,14 @@ class Application(Generic[T], ArgumentsMixin):
     async def _process_initial_args(
         self, *args, **kwargs
     ) -> Tuple[T, List[Any], Dict[str, Any]]:
+        has_var_kw = any(p.kind is Parameter.VAR_KEYWORD
+                         for p in self.sig.parameters.values())
+        extra = {}
+        if not has_var_kw:
+            # remove kwargs missed in app arguments, they belong to action
+            extra = {k: v for k, v in kwargs.items() if k not in self.sig.parameters}
+            kwargs = {k: v for k, v in kwargs.items() if k in self.sig.parameters}
+
         action_name, action = self.action_from_args(*args, **kwargs)
         if action is not None:
             if action_name not in self._actions:
@@ -373,7 +386,7 @@ class Application(Generic[T], ArgumentsMixin):
             args, kwargs = self.update_args(args, kwargs, action=action_name)
 
         a, kw = await self.parse_args(*args, **kwargs)
-        return action, a, kw
+        return action, a, kw, extra
 
     async def update_application_context(self, ctx: Dict) -> dict:
         ctx[CTX_APPLICATION] = self
