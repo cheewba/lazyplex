@@ -1,10 +1,16 @@
 from contextvars import ContextVar
 from contextlib import contextmanager
+from enum import StrEnum
 from typing import Tuple, Any, Generator
 
-__all__ = ['get_context']
+__all__ = ['get_context', 'ContextScope']
 
 empty = object()
+
+
+class ContextScope(StrEnum):
+    application = "application"
+    action = "action"
 
 
 class ApplicationContext(dict):
@@ -56,6 +62,12 @@ class ApplicationContext(dict):
         if (key not in self):
             self[key] = default
         return self[key]
+
+    def get_scope(self) -> ContextScope:
+        branch = _branch_context.get(None)
+        if branch:
+            return ContextScope.action
+        return ContextScope.application
 
 
 def get_context() -> ApplicationContext:
