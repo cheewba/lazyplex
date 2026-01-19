@@ -362,8 +362,16 @@ class Application(Generic[T], ArgumentsMixin):
     def action_from_args(self, *args, **kwargs) -> Tuple[str, Optional[ApplicationAction]]:
         bound = self.bind_args(*args, **kwargs)
         bound.apply_defaults()
-
         action = bound.arguments.get('action', empty)
+
+        if not action or action is empty:
+            if 'action' in kwargs:
+                action = kwargs.get('action')
+            elif (len(args) > 0
+                    and isinstance(args[0], str)
+                    and args[0] in self._actions):
+                action = args[0]
+
         if not action or action is empty:
             action = self._default_action
         return (name := action or ""), self._actions.get(name)
